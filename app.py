@@ -1,195 +1,184 @@
-# ==============================================================================
-# 1. LES OUTILS (IMPORTS)
-# ==============================================================================
-import streamlit as st           # L'architecte qui crée la page web et l'interface
-import yfinance as yf            # Le connecteur qui aspire les données de la Bourse
-import plotly.graph_objects as go # Le dessinateur qui trace les graphiques interactifs
-from datetime import datetime, timedelta # Pour calculer les dates (ex: il y a 2 ans)
-import pandas as pd              # Le calculateur qui manipule les gros tableaux de chiffres
-import requests                  # Pour envoyer des requêtes web (utilisé par le traducteur)
+import streamlit as st
+import yfinance as yf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import pandas as pd
+import requests
+import numpy as np
+
+st.set_page_config(page_title="Terminal Alpha - Screener Institutionnel", layout="wide")
 
 # ==============================================================================
-# 2. CONFIGURATION DE L'INTERFACE
+# FONCTIONS TECHNIQUES (TRADUCTEUR & CALCUL RSI)
 # ==============================================================================
-# On règle la page en mode "large" (wide) pour avoir de la place pour les graphiques
-st.set_page_config(page_title="Radar Pro - Value & Cycles", layout="wide")
-st.title("🦅 Radar Pro : Stratégie d'Accumulation & Valorisation")
-
-# ==============================================================================
-# 3. LE TRADUCTEUR (NOM -> SYMBOLE BOURSIER)
-# ==============================================================================
-# Cette fonction secrète permet de taper "Microsoft" au lieu de chercher "MSFT"
 def trouver_symbole(recherche):
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={recherche}"
-    headers = {'User-Agent': 'Mozilla/5.0'} # On se fait passer pour un navigateur classique
     try:
-        reponse = requests.get(url, headers=headers)
+        reponse = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
         donnees = reponse.json()
-        # Si Yahoo trouve une correspondance, on renvoie le symbole officiel
         if 'quotes' in donnees and len(donnees['quotes']) > 0:
             return donnees['quotes'][0]['symbol']
     except:
         pass
-    return recherche # Si ça échoue, on garde ce que l'utilisateur a tapé
+    return recherche
+
+def calculer_rsi(data, period=14):
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 # ==============================================================================
-# 4. LA BARRE DE RECHERCHE ET LES RÉGLAGES
+# INTERFACE & RÉGLAGES (SIDEBAR)
 # ==============================================================================
-# On divise l'écran en deux colonnes (2/3 pour la recherche, 1/3 pour le curseur de temps)
-col_search, col_time = st.columns([2, 1])
-
-with col_search:
-    user_input = st.text_input("Nom de l'entreprise ou Symbole :", "AAPL")
-
-with col_time:
-    # Un curseur allant de 1 à 10 ans pour ajuster la vision des cycles
-    annees = st.slider("Période d'analyse des cycles (Années)", min_value=1, max_value=10, value=2)
+with st.sidebar:
+    st.title("🦅 Terminal Alpha")
+    st.markdown("**Filtre d'Accumulation & Valorisation**")
+    user_input = st.text_input("Entreprise ou Ticker :", "MSFT")
+    annees = st.slider("Horizon d'analyse (Années)", 1, 10, 2)
+    st.markdown("---")
+    st.markdown("### ⚙️ Paramètres stricts")
+    max_pe = st.number_input("Plafond P/E toléré", value=20)
+    max_pb = st.number_input("Plafond P/B toléré", value=3.5)
 
 # ==============================================================================
-# 5. LE MOTEUR D'ANALYSE (Se lance quand on tape une recherche)
+# MOTEUR D'ANALYSE
 # ==============================================================================
 if user_input:
-    # Affiche une petite animation de chargement
-    with st.spinner("Aspiration des bilans comptables et calcul des points de pessimisme..."):
+    with st.spinner("Aspiration des bases de données et calcul des matrices..."):
         try:
-            # 5A. Traduction et connexion à l'entreprise
-            ticker_input = trouver_symbole(user_input).upper()
-            st.write(f"🔍 **Entreprise analysée : {ticker_input}**")
-            
-            stock = yf.Ticker(ticker_input)
+            ticker = trouver_symbole(user_input).upper()
+            stock = yf.Ticker(ticker)
             info = stock.info
-            
-            # 5B. Récupération de l'historique des prix sur la période choisie
             hist = stock.history(period=f"{annees}y")
+            
             if hist.empty:
-                st.error("Aucune donnée historique trouvée pour cette période.")
-                st.stop() # Arrête le programme si on ne trouve rien
+                st.error("Données historiques introuvables.")
+                st.stop()
 
-            # 5C. Extraction des données financières complexes (Bilans, Cash Flow)
-            cf = stock.cashflow
-            fin = stock.financials
-
-            # 5D. Mémorisation des indicateurs clés actuels
-            current_price = info.get('currentPrice', hist['Close'].iloc[-1])
-            high_period = hist['Close'].max()     # Le prix le plus haut de la période
-            pe_ratio_actuel = info.get('trailingPE', 0) # Le ratio Cours/Bénéfice (Valorisation)
-            
-            # ==================================================================
-            # 6. LE CALCUL DU PESSIMISME (DRAWDOWN)
-            # ==================================================================
-            # L'algorithme cherche le point le plus haut atteint, puis calcule 
-            # mathématiquement le pourcentage de chute depuis ce sommet.
+            # --- CALCULS TECHNIQUES ---
+            hist['SMA_50'] = hist['Close'].rolling(window=50).mean()
+            hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
+            hist['RSI'] = calculer_rsi(hist['Close'])
             rolling_max = hist['Close'].cummax()
-            drawdown = ((hist['Close'] - rolling_max) / rolling_max) * 100
-            chute_actuelle = drawdown.iloc[-1]
+            hist['Drawdown'] = ((hist['Close'] - rolling_max) / rolling_max) * 100
             
-            st.markdown("---")
+            prix_actuel = hist['Close'].iloc[-1]
+            chute_actuelle = hist['Drawdown'].iloc[-1]
+            rsi_actuel = hist['RSI'].iloc[-1] if not pd.isna(hist['RSI'].iloc[-1]) else 50
+
+            # --- CALCULS FONDAMENTAUX (VALORISATION) ---
+            pe_trailing = info.get('trailingPE', 0)
+            pe_forward = info.get('forwardPE', 0)
+            pb_ratio = info.get('priceToBook', 0)
+            ps_ratio = info.get('priceToSalesTrailing12Months', 0)
+            ev_ebitda = info.get('enterpriseToEbitda', 0)
             
+            # --- CALCULS FONDAMENTAUX (SANTÉ FINANCIÈRE) ---
+            debt_eq = info.get('debtToEquity', 0)
+            current_ratio = info.get('currentRatio', 0)
+            roe = info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0
+            margins = info.get('profitMargins', 0) * 100 if info.get('profitMargins') else 0
+            div_yield = info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0
+
             # ==================================================================
-            # 7. LE VERDICT DE LA STRATÉGIE
+            # EN-TÊTE : VERDICT D'ACCUMULATION
             # ==================================================================
-            st.header("🤖 Signal Stratégique : Création d'ETF Personnel")
-            c1, c2 = st.columns(2)
+            st.title(f"{info.get('longName', ticker)} ({ticker})")
             
-            with c1:
-                # RÈGLE 1 : Si ça a chuté fort ET que c'est sous-évalué = ACHAT
-                if chute_actuelle < -25 and 0 < pe_ratio_actuel < 18:
-                    st.success("🟢 **ACHAT FORT : PESSIMISME EXTRÊME**\n\nValorisation basse et forte chute. Excellente fenêtre pour accumuler des positions et construire ton portefeuille.")
-                
-                # RÈGLE 2 : Bouclier anti-surévaluation. Si c'est trop cher = REJET DIRECT
-                elif pe_ratio_actuel > 25:
-                    st.error("🔴 **REJET : SURÉVALUATION**\n\nL'entreprise est trop chère. Valeur surévaluée typique des ETF classiques. À écarter de la sélection.")
-                
-                # RÈGLE 3 : Entre les deux = ATTENTE
+            # Score d'accumulation basé sur la décote et la purge du marché
+            score = 0
+            if chute_actuelle < -20: score += 1
+            if rsi_actuel < 40: score += 1
+            if 0 < pe_trailing < max_pe: score += 1
+            if 0 < pb_ratio < max_pb: score += 1
+            if roe > 15: score += 1
+
+            col_score, col_kpi1, col_kpi2, col_kpi3 = st.columns([2, 1, 1, 1])
+            
+            with col_score:
+                if score >= 4:
+                    st.success(f"**🎯 STATUT : OPPORTUNITÉ MAJEURE (Score {score}/5)**\n\nPessimisme extrême détecté couplé à une valorisation saine. Idéal pour une accumulation structurelle.")
+                elif pe_trailing > max_pe or pb_ratio > (max_pb * 1.5):
+                    st.error(f"**🔴 STATUT : REJETÉ (Surévaluation)**\n\nMultiples de valorisation trop élevés. Risque de destruction de capital. À exclure du portefeuille.")
                 else:
-                    st.warning("🟠 **NEUTRE**\n\nAttendre un point de pessimisme plus profond pour frapper au plus bas, ou une meilleure valorisation.")
-            
-            with c2:
-                # Affichage des jauges à droite
-                st.metric("Chute depuis le sommet", f"{chute_actuelle:.1f}%", delta_color="inverse")
-                st.metric("Ratio P/E Actuel", f"{pe_ratio_actuel:.1f}")
+                    st.warning(f"**⏳ STATUT : SOUS OBSERVATION (Score {score}/5)**\n\nAttendre une purge plus violente du marché ou une amélioration des fondamentaux.")
+
+            with col_kpi1:
+                st.metric("Prix Actuel", f"${prix_actuel:.2f}", f"{chute_actuelle:.2f}% depuis sommet", delta_color="inverse")
+            with col_kpi2:
+                st.metric("P/E Ratio", f"{pe_trailing:.1f}", "Sous-évalué" if 0 < pe_trailing < max_pe else "Surévalué", delta_color="inverse" if pe_trailing > max_pe else "normal")
+            with col_kpi3:
+                st.metric("Indice de Panique (RSI)", f"{rsi_actuel:.0f}/100", "Survendu (Pessimisme)" if rsi_actuel < 30 else "Neutre", delta_color="inverse" if rsi_actuel < 30 else "normal")
 
             st.markdown("---")
-            
-            # ==================================================================
-            # 8. LA CONSTRUCTION DES GRAPHIQUES (LES ONGLETS)
-            # ==================================================================
-            tab1, tab2, tab3 = st.tabs(["📉 Prix & Cycles", "🩸 Courbe de Pessimisme", "💰 Bilans Historiques (FCF & P/E)"])
-            
-            # ONGLET 1 : LE PRIX CLASSIQUE
-            with tab1:
-                fig_price = go.Figure()
-                # On trace la ligne verte du prix
-                fig_price.add_trace(go.Scatter(x=hist.index, y=hist['Close'], mode='lines', name='Prix', line=dict(color='#00ff88')))
-                # On trace la ligne rouge pointillée du sommet
-                fig_price.add_hline(y=high_period, line_dash="dash", line_color="red", annotation_text=f"Sommet {annees} ans")
-                fig_price.update_layout(template="plotly_dark", height=400, margin=dict(l=0, r=0, t=0, b=0))
-                st.plotly_chart(fig_price, use_container_width=True)
-                
-            # ONGLET 2 : LA COURBE DE CHUTE (DRAWDOWN)
-            with tab2:
-                fig_dd = go.Figure()
-                # On trace une zone rouge qui descend vers le bas pour montrer la profondeur de la crise
-                fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown, fill='tozeroy', mode='lines', name='Chute %', line=dict(color='#ff4b4b')))
-                fig_dd.update_layout(template="plotly_dark", height=400, margin=dict(l=0, r=0, t=0, b=0), title="Recherche des points bas de marché")
-                st.plotly_chart(fig_dd, use_container_width=True)
 
-            # ONGLET 3 : LA RÉALITÉ COMPTABLE (LES BILANS)
-            with tab3:
-                st.markdown("### Évolution Comptable (Données officielles SEC / Yahoo)")
-                col_fcf, col_pe = st.columns(2)
-                
-                # GRAPH 3A : LE FREE CASH FLOW (L'argent réel généré)
-                with col_fcf:
-                    if not cf.empty and 'Free Cash Flow' in cf.index:
-                        # On récupère la ligne du FCF et on nettoie les trous
-                        fcf_data = cf.loc['Free Cash Flow'].dropna().sort_index()
-                        fig_fcf = go.Figure()
-                        # Vert si l'entreprise gagne du cash, Rouge si elle en brûle
-                        couleurs = ['#00ff88' if val > 0 else '#ff4b4b' for val in fcf_data.values]
-                        fig_fcf.add_trace(go.Bar(x=fcf_data.index.year, y=fcf_data.values, marker_color=couleurs))
-                        fig_fcf.update_layout(template="plotly_dark", title="Free Cash Flow Annuel", height=350, margin=dict(l=0, r=0, t=40, b=0))
-                        st.plotly_chart(fig_fcf, use_container_width=True)
-                    else:
-                        st.warning("Historique du Free Cash Flow indisponible.")
+            # ==================================================================
+            # ONGLET 1 : LA MATRICE DE VALORISATION MULTIPLE
+            # ==================================================================
+            st.subheader("⚖️ Scanner de Valorisation (Filtre anti-surévaluation)")
+            v1, v2, v3, v4, v5 = st.columns(5)
+            
+            v1.metric("P/E (Passé)", f"{pe_trailing:.1f}", "< 20 idéal")
+            v2.metric("P/E (Futur estimé)", f"{pe_forward:.1f}")
+            v3.metric("Price / Book", f"{pb_ratio:.2f}", "< 3 idéal")
+            v4.metric("Price / Sales", f"{ps_ratio:.2f}")
+            v5.metric("EV / EBITDA", f"{ev_ebitda:.1f}", "< 15 idéal")
 
-                # GRAPH 3B : LE P/E HISTORIQUE (Pour vérifier si l'action devient de plus en plus chère)
-                with col_pe:
-                    if not fin.empty and 'Basic EPS' in fin.index:
-                        eps_data = fin.loc['Basic EPS'].dropna().sort_index()
-                        pe_dates, pe_values = [], []
-                        
-                        hist_pe = stock.history(period="5y") 
-                        # On boucle sur chaque année où un bénéfice a été déclaré
-                        for date, eps in eps_data.items():
-                            if eps > 0: # L'entreprise doit être rentable pour calculer le P/E
-                                try:
-                                    # On cherche le prix de l'action à cette date précise dans le passé
-                                    if date in hist_pe.index:
-                                        prix_date = hist_pe.loc[date, 'Close']
-                                    else:
-                                        idx_proche = hist_pe.index.get_indexer([date], method='nearest')[0]
-                                        prix_date = hist_pe.iloc[idx_proche]['Close']
-                                    
-                                    # Formule mathématique du P/E : Prix divisé par le Bénéfice (EPS)
-                                    pe_values.append(prix_date / eps)
-                                    pe_dates.append(date.year)
-                                except:
-                                    pass
-                        
-                        if pe_values:
-                            fig_pe = go.Figure()
-                            # On trace la courbe jaune du P/E
-                            fig_pe.add_trace(go.Scatter(x=pe_dates, y=pe_values, mode='lines+markers', name='P/E Ratio', line=dict(color='#ffaa00', width=3), marker=dict(size=10)))
-                            # On fixe la ligne rouge de danger : Le plafond de surévaluation
-                            fig_pe.add_hline(y=20, line_dash="dash", line_color="red", annotation_text="Plafond Valeur (20x)")
-                            fig_pe.update_layout(template="plotly_dark", title="Ratio P/E Historique (aux clôtures)", height=350, margin=dict(l=0, r=0, t=40, b=0))
-                            st.plotly_chart(fig_pe, use_container_width=True)
-                        else:
-                            st.info("Bénéfices négatifs, P/E historique incalculable.")
-                    else:
-                        st.warning("Historique des bénéfices indisponible.")
+            st.markdown("---")
+
+            # ==================================================================
+            # ONGLET 2 : GRAPHIQUE PROFESSIONNEL (Prix, MMs, RSI, Volume)
+            # ==================================================================
+            st.subheader(f"📈 Radiographie Technique ({annees} ans)")
+            
+            # Création d'un graphique à 3 étages (Prix, Volume, RSI)
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
+                                vertical_spacing=0.05, 
+                                row_heights=[0.6, 0.2, 0.2])
+
+            # 1. Le Prix et les Moyennes Mobiles
+            fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name="Prix", line=dict(color="#00ff88")), row=1, col=1)
+            fig.add_trace(go.Scatter(x=hist.index, y=hist['SMA_50'], name="SMA 50", line=dict(color="#ffaa00", width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=hist.index, y=hist['SMA_200'], name="SMA 200", line=dict(color="#ff4b4b", width=1.5)), row=1, col=1)
+
+            # 2. Les Volumes (Pour voir où les institutions capitulent)
+            couleurs_volume = ['#ff4b4b' if row['Open'] > row['Close'] else '#00ff88' for index, row in hist.iterrows()]
+            fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], name="Volume", marker_color=couleurs_volume), row=2, col=1)
+
+            # 3. Le RSI (Indicateur de Pessimisme Absolu)
+            fig.add_trace(go.Scatter(x=hist.index, y=hist['RSI'], name="RSI", line=dict(color="#00d4ff")), row=3, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="#00ff88", row=3, col=1, annotation_text="Pessimisme (Achat)")
+            fig.add_hline(y=70, line_dash="dash", line_color="#ff4b4b", row=3, col=1, annotation_text="Euphorie (Vente)")
+
+            fig.update_layout(template="plotly_dark", height=700, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ==================================================================
+            # ONGLET 3 : SANTÉ FINANCIÈRE (Le Filtre de Qualité)
+            # ==================================================================
+            st.markdown("---")
+            st.subheader("🏦 Bilan & Qualité de l'Entreprise")
+            
+            q1, q2, q3, q4 = st.columns(4)
+            with q1:
+                st.info(f"**Rentabilité (ROE)**\n\n{roe:.1f}%" + (" ✅" if roe > 15 else " ❌"))
+            with q2:
+                st.info(f"**Marges Nettes**\n\n{margins:.1f}%" + (" ✅" if margins > 10 else " ❌"))
+            with q3:
+                st.info(f"**Dette / Capitaux**\n\n{debt_eq:.1f}%" + (" ✅" if debt_eq < 100 else " ❌"))
+            with q4:
+                st.info(f"**Rendement Dividende**\n\n{div_yield:.2f}%")
+
+            # ==================================================================
+            # GRAPHIQUE 4 : LA COURBE DE DRAWDOWN (Profondeur de crise)
+            # ==================================================================
+            st.subheader("🩸 Chronologie des purges (Drawdown)")
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=hist.index, y=hist['Drawdown'], fill='tozeroy', mode='lines', name='Chute %', line=dict(color='#ff4b4b')))
+            fig_dd.update_layout(template="plotly_dark", height=300, margin=dict(l=0, r=0, t=30, b=0))
+            st.plotly_chart(fig_dd, use_container_width=True)
 
         except Exception as e:
-            # Sécurité finale si l'entreprise n'existe pas ou si Yahoo bloque la connexion
-            st.error(f"Erreur de récupération. Les données de cette entreprise sont peut-être restreintes. ({e})")
+            st.error(f"Erreur système. Action non trouvée ou données inaccessibles. ({e})")
