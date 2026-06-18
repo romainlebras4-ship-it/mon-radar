@@ -2,15 +2,34 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import requests
 
 st.set_page_config(page_title="Radar Pro - Value & Cycles", layout="wide")
 st.title("🦅 Radar Pro : Fondamentaux & Cycles d'Accumulation")
 
-ticker_input = st.text_input("Symbole de l'action (ex: AAPL, TTE.PA) :", "AAPL").upper()
+# --- LE TRADUCTEUR NOM -> SYMBOLE ---
+def trouver_symbole(recherche):
+    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={recherche}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        reponse = requests.get(url, headers=headers)
+        donnees = reponse.json()
+        if 'quotes' in donnees and len(donnees['quotes']) > 0:
+            return donnees['quotes'][0]['symbol']
+    except:
+        pass
+    return recherche
 
-if ticker_input:
-    with st.spinner("Analyse des cycles et des bilans financiers en cours..."):
+# La barre de recherche accepte maintenant les noms complets
+user_input = st.text_input("Nom de l'entreprise ou Symbole (ex: ServiceNow, Total, AAPL) :", "AAPL")
+
+if user_input:
+    with st.spinner("Recherche de l'entreprise et analyse des bilans en cours..."):
         try:
+            # Traduction automatique
+            ticker_input = trouver_symbole(user_input).upper()
+            st.write(f"🔍 **Entreprise identifiée : {ticker_input}**")
+            
             stock = yf.Ticker(ticker_input)
             info = stock.info
             
@@ -63,6 +82,9 @@ if ticker_input:
             fig.add_hline(y=high_2y, line_dash="dash", line_color="red", annotation_text="Sommet 2 ans")
             fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0, r=0, t=0, b=0))
             st.plotly_chart(fig, use_container_width=True)
+
+        except Exception as e:
+            st.error("Erreur de récupération. L'entreprise n'a pas été trouvée ou les données sont indisponibles.")
 
         except Exception as e:
             st.error("Erreur de récupération. Vérifiez le symbole de l'action.")
